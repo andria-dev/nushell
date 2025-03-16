@@ -78,3 +78,9 @@ def assert_length [] {
 def assert_skip [] {
     assert true # This test case is skipped on purpose
 }
+
+#[test]
+def assert_streaming [] {
+    assert streaming "first" { first } 1
+    assert error { assert streaming "first" { first } 10 }
+}

@@ -294,3 +294,43 @@ export def "str contains" [left: string, right: string, message?: string] {
         )
     }
 }
+
+# Assert that, when a stream is piped into a testee, the testee triggers the correct amount of iterations on the stream.
+# This is useful for testing whether or not a command modifies/operates on a stream or collects it into a list instead.
+# In other words, you can test whether or not a command respects the output of generate (a stream).
+#
+# # Example
+# ```
+# # Simple test with defaults. First should only retrieve the first element in the stream (one iteration).
+# assert streaming "first" { first } 1
+#
+# # Custom generator for more complex testing. Select, when provided a column name, should modify the stream without collecting it.
+# assert streaming "select > column" { select name | first } 1 --generator {|record| { out: $record, next: { name: ($record.name + "A") } }} --generator-initial-value { name: "" }
+# ```
+export def streaming [
+	testee_name: string, # The name of the testee (used in error label).
+	testee: closure, # A closure that will receive the stream through the pipeline.
+	expected_iterations: number, # The number of iterations expected to be triggered on the stream by the testee.
+	--generator: closure, # A closure used to generate the values of the stream in format `{ out: any, next: any }` where `out` is the output of the stream and `next` is the next value to be passed to this closure. Defaults to a closure that increments the input by 1 every call.
+	--generator-initial-value: any = 0, # The initial value to use for the generator.
+	--iteration-limit: number = 10 # The number of iterations for the stream to stop at. This is used to prevent an infinite stream.
+]: nothing -> nothing {
+	# Make sure the table to track streaming test iterations exists, then create a new row for this test, saving the ID of the row.
+	let db = stor open
+	$db | query db "CREATE TABLE IF NOT EXISTS streaming_test (iterations INTEGER);"
+	let id: int = ($db | query db "INSERT INTO streaming_test (iterations) VALUES (0) RETURNING rowid;" | get 0.rowid)
+
+	# Create a stream that keeps track of iterations and stops generating new values after reaching the iteration limit, then pipe it into the testee.
+	let generator: closure = if $generator != null { $generator } else {{|x: number| { out: $x, next: ($x + 1) }}}
+	generate {|value|
+		if ($db | query db $"UPDATE streaming_test SET iterations = iterations + 1 WHERE rowid = ($id) RETURNING iterations;" | get 0.iterations) >= $iteration_limit { return {} }
+		do $generator $value
+	} $generator_initial_value | do $testee
+
+	# Compare the number of iterations triggered by the testee to the expected number of iterations.
+	let actual_iterations: number = ($db | query db $"SELECT iterations FROM streaming_test WHERE rowid = ($id);" | get 0.iterations)
+	main ($actual_iterations == $expected_iterations) --error-label {
+		text: $"Expected the streaming test for \"($testee_name)\" to iterate ($expected_iterations) time(if $expected_iterations != 1 {'s'}) but it iterated ($actual_iterations) time(if $actual_iterations != 1 {'s'}).",
+		span: (metadata $testee).span,
+	}
+}
